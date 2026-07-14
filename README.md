@@ -6,26 +6,26 @@ Proyecto para análisis de trazas, logs y datasets de inyección de fallas en Op
 
 ```text
 openstack-aiops-project/
-├── .env            # Variables de entorno locales (Excluido en .gitignore)
+├── .env                # Variables de entorno locales (Excluido en .gitignore)
 ├── .gitignore
-├── pyproject.toml  # Librerías necesarias (pandas, scipy, statsmodels, seaborn, etc.)
-├── uv.lock         # Lockfile estricto de dependencias autogenerado por UV
-├── main.ipynb      # JUPYTER NOTEBOOK PRINCIPAL (Actúa como Main de orquestación)
+├── pyproject.toml      # Librerías necesarias (pandas, scipy, statsmodels, seaborn, etc.)
+├── uv.lock             # Lockfile estricto de dependencias autogenerado por UV
+├── main.ipynb          # JUPYTER NOTEBOOK PRINCIPAL (Actúa como Main de orquestación)
 ├── data/
-│   ├── raw/        # Versión original/cruda (Logs, Zipkin JSONs, matrices TSB)
-│   └── processed/  # Tabla analítica final generada tras el ETL (.csv)
-├── docs/           # Documentación general
-├── notebooks/      # Espacio de experimentación / borradores individuales
+│   ├── raw/            # Versión original/cruda (Logs, Zipkin JSONs, matrices TSB)
+│   └── processed/      # Tabla analítica final generada tras el ETL (.csv)
+├── docs/               # Documentación general
+├── notebooks/          # Espacio de experimentación / borradores individuales
 │   ├── sandbox_alumno1.ipynb 
 │   └── sandbox_alumno2.ipynb
 └── src/
     ├── __init__.py
-    ├── etl.py  # Módulo de Extracción, Limpieza y Feature Engineering
-    ├── eda.py  # Módulo de Análisis Exploratorio y Dispersión
-    ├── stats_testing/ # Módulo de Inferencia y Modelado Estadístico
+    ├── etl.py          # Módulo de Extracción, Limpieza y Feature Engineering
+    ├── eda.py          # Módulo de Análisis Exploratorio y Dispersión
+    ├── stats_testing/  # Módulo de Inferencia y Modelado Estadístico
     │   ├── __init__.py
     │   └── stats_testing.py
-    └── models/ # Módulo de Regresión y Modelos de ML Futuros
+    └── models/         # Módulo de Regresión y Modelos de ML Futuros
         ├── __init__.py
         └── models.py
 ```
