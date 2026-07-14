@@ -1,0 +1,12 @@
+[project]
+name = "openstack-aiops-project"
+version = "0.1.0"
+description = "AIOps analysis project for OpenStack fault injection datasets"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas",
+    "huggingface_hub",
+]
+
+[tool.uv]
+package = false
