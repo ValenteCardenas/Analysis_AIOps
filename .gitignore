@@ -2,3 +2,4 @@ data/
 Fault-Injection-Dataset-master/
 *.zip
 *.tar.gz
+/nohup.out
