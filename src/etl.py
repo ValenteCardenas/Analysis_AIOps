@@ -147,9 +147,7 @@ def armar_tabla_logs(
 
     return df_resultado
 
-# ---------------------------------------------------------------------------
-# 1. Cargar los CSVs donde vienen los resultados de las fallas
-# ---------------------------------------------------------------------------
+
 def cargar_csvs_fallas(carpeta_dataset: Path | None = None) -> pd.DataFrame:
     if carpeta_dataset == None:
         carpeta_dataset = CARPETA_DATOS
@@ -187,9 +185,7 @@ def cargar_csvs_fallas(carpeta_dataset: Path | None = None) -> pd.DataFrame:
 
     return resultado_final
 
-# ---------------------------------------------------------------------------
-# 2. Sacar los datos del archivo de inyeccion (fip_info.data)
-# ---------------------------------------------------------------------------
+#Aqui se sacan los metadatos de las fallas
 def _leer_info_fip(ruta_fip: Path) -> dict:
     # Abre y lee el archivo de fip_info y lo hace un diccionario
     informacion_fip = {}
@@ -235,9 +231,7 @@ def cargar_metadatos_fallas(carpeta_dataset: Path | None = None) -> pd.DataFrame
     df_metadatos = pd.DataFrame(registros)
     return df_metadatos
 
-# ---------------------------------------------------------------------------
-# 3. Sacar el log de error de la carga de trabajo
-# ---------------------------------------------------------------------------
+
 def _leer_log_error_workload(ruta_log_error: Path) -> dict:
     resultado = {"assertion_result": None, "error_raw": None}
     if not ruta_log_error.exists():
@@ -257,9 +251,6 @@ def _leer_log_error_workload(ruta_log_error: Path) -> dict:
 
     return resultado
 
-# ---------------------------------------------------------------------------
-# 4. Encontrar a que hora exactamente se activo la falla (trigger log)
-# ---------------------------------------------------------------------------
 def _leer_log_disparo(ruta_trigger: Path) -> dict:
     resultado = {"trigger_timestamp": None}
     if not ruta_trigger.exists():
@@ -273,9 +264,7 @@ def _leer_log_disparo(ruta_trigger: Path) -> dict:
 
     return resultado
 
-# ---------------------------------------------------------------------------
-# 5. Contar cuantas lineas hay de cada tipo de error
-# ---------------------------------------------------------------------------
+
 def _contar_niveles_log(directorio_log: Path) -> dict[str, int]:
     conteo_niveles = {
         "DEBUG": 0, "INFO": 0, "WARNING": 0,
@@ -308,9 +297,6 @@ def _contar_niveles_log(directorio_log: Path) -> dict[str, int]:
     conteo_niveles["total_log_lines"] = lineas_totales
     return conteo_niveles
 
-# ===========================================================================
-# SECCION PRINCIPAL: Unimos todo en una super tabla
-# ===========================================================================
 def crear_tabla_analisis(
     carpeta_dataset: Path | None = None,
     *,
@@ -377,3 +363,159 @@ def crear_tabla_analisis(
 
     return tabla_maestra
 
+
+# SECCION DE LIMPIEZA: Funciones para limpiar y preparar los datos
+
+def limpiar_valores_nulos(df: pd.DataFrame, imprimir_mensajes: bool = True) -> pd.DataFrame:
+    # Hacemos una copia para no echar a perder el original
+    df_limpio = df.copy()
+
+    nulos_antes = df_limpio.isnull().sum().sum()
+
+    # Si assertion_result esta vacio, significa que la prueba no detecto ninguna falla
+    df_limpio["assertion_result"] = df_limpio["assertion_result"].fillna("SIN_FALLA_DETECTADA")
+
+    # Si no hay error crudo, le ponemos que no hubo error
+    df_limpio["error_raw"] = df_limpio["error_raw"].fillna("sin_error")
+
+    # Arreglamos la fecha y hora. Los nulos se quedan como NaT automaticamente
+    df_limpio["trigger_timestamp"] = pd.to_datetime(
+        df_limpio["trigger_timestamp"], format="%Y-%m-%d %H:%M:%S.%f", errors="coerce"
+    )
+
+    nulos_despues = df_limpio.isnull().sum().sum()
+
+    if imprimir_mensajes:
+        print(f"[Limpieza] Teniamos {nulos_antes} nulos y ahora tenemos {nulos_despues}")
+        print(f"           (El trigger_timestamp tiene {df_limpio['trigger_timestamp'].isna().sum()} nulos, esta bien)")
+
+    return df_limpio
+
+
+def quitar_duplicados(df: pd.DataFrame, imprimir_mensajes: bool = True) -> pd.DataFrame:
+    df_limpio = df.copy()
+    # Checamos si hay filas repetidas
+    duplicados = df_limpio.duplicated().sum()
+
+    if duplicados > 0:
+        # Si hay, las borramos
+        df_limpio = df_limpio.drop_duplicates()
+        if imprimir_mensajes:
+            print(f"[Limpieza] Borramos {duplicados} filas repetidas.")
+    else:
+        if imprimir_mensajes:
+            print("[Limpieza] Que bien, no hay filas repetidas.")
+
+    return df_limpio
+
+
+def arreglar_tipos_datos(df: pd.DataFrame, imprimir_mensajes: bool = True) -> pd.DataFrame:
+    df_limpio = df.copy()
+
+    # Ponemos estas como categorias para que pandas no gaste tanta memoria
+    columnas_categoricas = ["subsystem", "fault_type", "assertion_result"]
+    for col in columnas_categoricas:
+        if col in df_limpio.columns:
+            df_limpio[col] = df_limpio[col].astype("category")
+
+    # Por si acaso aseguramos que el timestamp sea fecha
+    if df_limpio["trigger_timestamp"].dtype == "object" or df_limpio["trigger_timestamp"].dtype == "str":
+        df_limpio["trigger_timestamp"] = pd.to_datetime(
+            df_limpio["trigger_timestamp"], format="%Y-%m-%d %H:%M:%S.%f", errors="coerce"
+        )
+
+    if imprimir_mensajes:
+        print("[Limpieza] Ya arreglamos los tipos de datos:")
+        print(f"           subsystem ahora es categoria ({df_limpio['subsystem'].cat.categories.tolist()})")
+        print(f"           fault_type ahora es categoria ({df_limpio['fault_type'].nunique()} tipos diferentes)")
+        print(f"           assertion_result ahora es categoria ({df_limpio['assertion_result'].nunique()} tipos)")
+        print(f"           trigger_timestamp es {df_limpio['trigger_timestamp'].dtype}")
+
+    return df_limpio
+
+
+def simplificar_tipo_falla(df: pd.DataFrame, imprimir_mensajes: bool = True) -> pd.DataFrame:
+    df_limpio = df.copy()
+
+    # Rompemos el tipo de falla a la mitad usando el guion medio
+    # Ejemplo: OPENSTACK_MISSING_FUNCTION_CALL-VOLUME se hace dos partes
+    partes = df_limpio["fault_type"].astype(str).str.rsplit("-", n=1, expand=True)
+    df_limpio["fault_target"] = partes[1] if 1 in partes.columns else "UNKNOWN"
+
+    # La primera parte la agarramos para sacar el origen
+    prefijo = partes[0]
+
+    # Origenes que ya conocemos
+    origenes_conocidos = ["OPENSTACK", "DISKIO", "NETIO", "URLLIB", "URLPARSE", "OS"]
+    
+    lista_origenes = []
+    lista_categorias = []
+    for valor in prefijo:
+        origen_encontrado = "OTRO"
+        categoria = valor
+        for origen in origenes_conocidos:
+            if valor.startswith(origen + "_"):
+                origen_encontrado = origen
+                # Le mochamos el origen para quedarnos nomas con la categoria
+                categoria = valor[len(origen) + 1:]
+                break
+        lista_origenes.append(origen_encontrado)
+        lista_categorias.append(categoria)
+
+    # Las guardamos en el df como categorias
+    df_limpio["fault_origin"] = pd.Categorical(lista_origenes)
+    df_limpio["fault_category"] = pd.Categorical(lista_categorias)
+    df_limpio["fault_target"] = df_limpio["fault_target"].astype("category")
+
+    if imprimir_mensajes:
+        print("[Limpieza] Dividimos el tipo de falla en varias columnas:")
+        print(f"           fault_origin -> {df_limpio['fault_origin'].nunique()} valores: {df_limpio['fault_origin'].value_counts().index.tolist()}")
+        print(f"           fault_category -> {df_limpio['fault_category'].nunique()} categorias")
+        print(f"           fault_target -> {df_limpio['fault_target'].nunique()} valores: {df_limpio['fault_target'].value_counts().index.tolist()}")
+
+    return df_limpio
+
+
+def limpiar_df_completo(df: pd.DataFrame, imprimir_mensajes: bool = True) -> pd.DataFrame:
+    if imprimir_mensajes:
+        print("=" * 50)
+        print("VAMOS A LIMPIAR LA TABLA PRINCIPAL")
+        print("=" * 50)
+
+    # Llamamos a todas las funciones una tras otra
+    df = quitar_duplicados(df, imprimir_mensajes)
+    df = limpiar_valores_nulos(df, imprimir_mensajes)
+    df = arreglar_tipos_datos(df, imprimir_mensajes)
+    df = simplificar_tipo_falla(df, imprimir_mensajes)
+
+    if imprimir_mensajes:
+        print(f"\n[Limpieza] Todo listo. Nos quedo una tabla de {df.shape[0]} filas y {df.shape[1]} columnas")
+        print("=" * 50)
+
+    return df
+
+
+def limpiar_logs(df_logs: pd.DataFrame, imprimir_mensajes: bool = True) -> pd.DataFrame:
+    df_limpio = df_logs.copy()
+    filas_antes = len(df_limpio)
+
+    # Quitamos los logs repetidos para no inflar los datos
+    df_limpio = df_limpio.drop_duplicates(
+        subset=["timestamp", "pid", "level", "module", "message", "test_id", "round_id"],
+        keep="first"
+    )
+    duplicados_quitados = filas_antes - len(df_limpio)
+
+    # Ponemos estas columnas como categoria para ahorrar espacio
+    for col in ["level", "subsystem", "round_id", "log_source"]:
+        df_limpio[col] = df_limpio[col].astype("category")
+
+    # Acomodamos todo por fecha y hora para que el analisis quede bien
+    df_limpio = df_limpio.sort_values("timestamp").reset_index(drop=True)
+
+    if imprimir_mensajes:
+        print(f"[Limpieza Logs] Quitamos {duplicados_quitados:,} lineas repetidas")
+        print(f"[Limpieza Logs] Al final quedaron {len(df_limpio):,} lineas de log")
+        print(f"[Limpieza Logs] Se acomodaron los tipos de datos y se ordeno todo por fecha")
+
+    return df_limpio
