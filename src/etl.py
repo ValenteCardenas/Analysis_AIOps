@@ -2,8 +2,15 @@ from pathlib import Path
 import re
 import pandas as pd
 
-# Directorio por defecto de los datos
-CARPETA_DATOS = Path(__file__).resolve().parent.parent / "Fault-Injection-Dataset-master"
+# Directorio por defecto de los datos (busca en la raiz o en data/)
+_raiz = Path(__file__).resolve().parent.parent
+_opciones_datos = [
+    _raiz / "Fault-Injection-Dataset-master",
+    _raiz / "data" / "Fault-Injection-Dataset",
+    _raiz / "data" / "Fault-Injection-Dataset-master",
+    _raiz / "data",
+]
+CARPETA_DATOS = next((p for p in _opciones_datos if p.is_dir()), _opciones_datos[0])
 
 SISTEMAS = ("Nova", "Cinder", "Neutron")
 
@@ -157,33 +164,61 @@ def cargar_csvs_fallas(carpeta_dataset: Path | None = None) -> pd.DataFrame:
     tablas = []
     for sistema in SISTEMAS:
         ruta_csv = carpeta_dataset / f"{sistema.lower()}.csv"
+        es_tsv = False
+        if not ruta_csv.exists():
+            ruta_csv = carpeta_dataset / f"{sistema.lower()}.tsv"
+            es_tsv = True
+
         if not ruta_csv.exists():
             continue
 
-        tabla_sistema = pd.read_csv(ruta_csv)
-        
+        try:
+            if es_tsv:
+                tabla_sistema = pd.read_csv(ruta_csv, sep="\t")
+            else:
+                tabla_sistema = pd.read_csv(ruta_csv)
+                if len(tabla_sistema.columns) <= 1:
+                    tabla_sistema = pd.read_csv(ruta_csv, sep="\t")
+        except Exception:
+            tabla_sistema = pd.read_csv(ruta_csv, sep="\t")
+
         # Le cambiamos los nombres a las columnas para que queden mejor
         nuevas_columnas = []
         for col in tabla_sistema.columns:
             nombre_limpio = col.strip().lower().replace(" ", "_")
             nuevas_columnas.append(nombre_limpio)
         tabla_sistema.columns = nuevas_columnas
-        
+
         tabla_sistema = tabla_sistema.rename(columns={
             "test": "test_id",
-            "round_1_failure": "round_1_failure",
-            "round_2_failure": "round_2_failure",
+            "round_1": "round_1_failure",
+            "round_2": "round_2_failure",
         })
         tabla_sistema["subsystem"] = sistema
+        cols_keep = [c for c in ["test_id", "round_1_failure", "round_2_failure", "subsystem"] if c in tabla_sistema.columns]
+        tabla_sistema = tabla_sistema[cols_keep]
         tablas.append(tabla_sistema)
+
+    if not tablas:
+        return pd.DataFrame()
 
     resultado_final = pd.concat(tablas, ignore_index=True)
 
-    # Cambiamos los strings de yes/no a valores de verdad o falso
+    # Cambiamos los strings de yes/no o failure/no_failure a valores de verdad o falso
+    mapeo_booleanos = {
+        "yes": True, "no": False,
+        "failure": True, "no_failure": False,
+        "true": True, "false": False,
+    }
     for columna in ("round_1_failure", "round_2_failure"):
-        resultado_final[columna] = resultado_final[columna].str.strip().str.lower().map({"yes": True, "no": False})
+        if columna in resultado_final.columns:
+            s_map = resultado_final[columna].astype(str).str.strip().str.lower().map(mapeo_booleanos)
+            if s_map.notna().any():
+                resultado_final[columna] = s_map.fillna(resultado_final[columna]).astype(bool)
 
     return resultado_final
+
+
 
 #Aqui se sacan los metadatos de las fallas
 def _leer_info_fip(ruta_fip: Path) -> dict:
