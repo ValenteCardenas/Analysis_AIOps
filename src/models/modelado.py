@@ -11,7 +11,7 @@ def preparar_datos_modelo(df_limpio: pd.DataFrame, df_logs_limpio: pd.DataFrame,
         print("[Modelado] Agrupando los logs por prueba y por round...")
         
     # Vamos a contar cuantos logs de cada nivel hay por cada prueba y round
-    conteo_logs = df_logs_limpio.groupby(['test_id', 'round_id', 'level']).size().unstack(fill_value=0)
+    conteo_logs = df_logs_limpio.groupby(['subsystem', 'test_id', 'round_id', 'level'], observed=False).size().unstack(fill_value=0)
     conteo_logs = conteo_logs.reset_index()
     
     # Nos interesan principalmente los WARNINGS y ERRORS
@@ -23,11 +23,14 @@ def preparar_datos_modelo(df_limpio: pd.DataFrame, df_logs_limpio: pd.DataFrame,
         
     if 'WARNING' not in conteo_logs.columns:
         conteo_logs['WARNING'] = 0
+
+    columnas_nivel = [c for c in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL', 'TRACE'] if c in conteo_logs.columns]
+    conteo_logs['total_log_lines'] = conteo_logs[columnas_nivel].sum(axis=1)
         
     # Ahora vamos a cruzar esta info con la metadata de las fallas
     # Queremos saber el subsistema y el origen de la falla
     columnas_metadata = ['test_id', 'subsystem', 'fault_origin', 'fault_category']
-    df_modelo = pd.merge(conteo_logs, df_limpio[columnas_metadata], on='test_id', how='inner')
+    df_modelo = pd.merge(conteo_logs, df_limpio[columnas_metadata], on=['test_id', 'subsystem'], how='inner')
     
     if imprimir_mensajes:
         print(f"[Modelado] Listo. Tenemos un dataset con {len(df_modelo)} filas.")
@@ -184,4 +187,212 @@ def evaluar_supuestos_y_metricas_regresion(modelo):
     print(f"   - MAE (Error Absoluto Medio): {mae:.2f} errores")
     print(f"   - RMSE (Raiz del Error Cuadratico Medio): {rmse:.2f} errores")
     print("    En promedio, el modelo se equivoca por esta cantidad de errores al intentar predecir el impacto de una falla.")
+
+
+def evaluar_normalidad_variables(df_modelo: pd.DataFrame, variables: list | None = None, imprimir_mensajes: bool = True) -> pd.DataFrame:
+    """
+    Evalúa la normalidad de las variables de telemetría continuas/conteo mediante la prueba de Shapiro-Wilk.
+    """
+    if variables is None:
+        variables = ['ERROR_TOTAL', 'WARNING', 'total_log_lines']
+    variables_existentes = [v for v in variables if v in df_modelo.columns]
+    
+    resultados = []
+    for var in variables_existentes:
+        datos_validos = df_modelo[var].dropna()
+        if len(datos_validos) >= 3:
+            stat, p_val = shapiro(datos_validos[:5000])
+            es_normal = "Sí" if p_val >= 0.05 else "No (Sesgada)"
+            resultados.append({
+                "Variable": var,
+                "Estadistico_Shapiro": stat,
+                "p_value": p_val,
+                "Es_Normal": es_normal
+            })
+            
+    df_res = pd.DataFrame(resultados)
+    
+    if imprimir_mensajes:
+        print("\n" + "="*50)
+        print("EVALUACIÓN FORMAL DE NORMALIDAD (SHAPIRO-WILK DIRECTO)")
+        print("="*50)
+        print(df_res.to_string(index=False))
+        
+    return df_res
+
+
+def estimar_bootstrap_ic(df_modelo: pd.DataFrame, columna: str = "ERROR_TOTAL", grupo_col: str = "round_id", n_bootstrap: int = 1000, ci: float = 95.0, imprimir_mensajes: bool = True) -> dict:
+    """
+    Estima los intervalos de confianza mediante Bootstrap (remuestreo con reemplazo)
+    para la media y la mediana de una variable de telemetría segregada por grupo (p. ej. round_id).
+    """
+    if imprimir_mensajes:
+        print("\n" + "="*50)
+        print(f"ESTIMACIÓN CON BOOTSTRAP (IC {ci}%) - Variable: {columna}")
+        print("="*50)
+        
+    np.random.seed(42)
+    resultados = {}
+    
+    alpha_inf = (100.0 - ci) / 2.0
+    alpha_sup = 100.0 - alpha_inf
+    
+    grupos = df_modelo[grupo_col].unique()
+    for grupo in grupos:
+        datos_grupo = df_modelo[df_modelo[grupo_col] == grupo][columna].dropna().values
+        n = len(datos_grupo)
+        
+        if n == 0:
+            continue
+            
+        medias_boot = np.empty(n_bootstrap)
+        medianas_boot = np.empty(n_bootstrap)
+        
+        for i in range(n_bootstrap):
+            muestra = np.random.choice(datos_grupo, size=n, replace=True)
+            medias_boot[i] = np.mean(muestra)
+            medianas_boot[i] = np.median(muestra)
+            
+        ic_media = (np.percentile(medias_boot, alpha_inf), np.percentile(medias_boot, alpha_sup))
+        ic_mediana = (np.percentile(medianas_boot, alpha_inf), np.percentile(medianas_boot, alpha_sup))
+        
+        resultados[grupo] = {
+            'media_obs': np.mean(datos_grupo),
+            'ic_media': ic_media,
+            'mediana_obs': np.median(datos_grupo),
+            'ic_mediana': ic_mediana
+        }
+        
+        if imprimir_mensajes:
+            print(f"Grupo [{grupo}] (n={n}):")
+            print(f"   - Media observada:   {np.mean(datos_grupo):.2f} (IC {ci}% Bootstrap: [{ic_media[0]:.2f}, {ic_media[1]:.2f}])")
+            print(f"   - Mediana observada: {np.median(datos_grupo):.2f} (IC {ci}% Bootstrap: [{ic_mediana[0]:.2f}, {ic_mediana[1]:.2f}])")
+            
+    return resultados
+
+
+def comparar_grupos_no_parametricos(df_modelo: pd.DataFrame, imprimir_mensajes: bool = True) -> dict:
+    """
+    Realiza pruebas de significancia no paramétricas sobre las variables de conteo:
+    1. Mann-Whitney U (o Wilcoxon Rank-Sum) entre Round 1 vs Round 2.
+    2. Kruskal-Wallis entre los subsistemas (Nova, Cinder, Neutron) en Round 1.
+    """
+    if imprimir_mensajes:
+        print("\n" + "="*50)
+        print("PRUEBAS NO PARAMÉTRICAS DE COMPARACIÓN DE GRUPOS")
+        print("="*50)
+        
+    # 1. Mann-Whitney U: Round 1 vs Round 2 en ERROR_TOTAL
+    r1_errors = df_modelo[df_modelo['round_id'] == 'round_1']['ERROR_TOTAL'].dropna()
+    r2_errors = df_modelo[df_modelo['round_id'] == 'round_2']['ERROR_TOTAL'].dropna()
+    
+    stat_mw, p_mw = stats.mannwhitneyu(r1_errors, r2_errors, alternative='two-sided')
+    
+    if imprimir_mensajes:
+        print("1. Mann-Whitney U (ERROR_TOTAL: Round 1 vs Round 2):")
+        print(f"   - Estadistico U: {stat_mw:.2f}")
+        print(f"   - Valor-p: {p_mw:.4e}")
+        if p_mw < 0.05:
+            print("   -> CONCLUSION: Diferencia estadisticamente significativa en la magnitud de errores entre rounds.")
+        else:
+            print("   -> CONCLUSION: No hay diferencia significativa en la magnitud de errores.")
+            
+    # 2. Kruskal-Wallis: ERROR_TOTAL por Subsistema en Round 1
+    datos_r1 = df_modelo[df_modelo['round_id'] == 'round_1']
+    subsistemas = datos_r1['subsystem'].unique()
+    grupos_sub = [datos_r1[datos_r1['subsystem'] == sub]['ERROR_TOTAL'].dropna() for sub in subsistemas]
+    
+    stat_kw, p_kw = stats.kruskal(*grupos_sub)
+    
+    if imprimir_mensajes:
+        print("\n2. Kruskal-Wallis (ERROR_TOTAL en Round 1 por Subsistema):")
+        print(f"   - Estadistico H (Kruskal-Wallis): {stat_kw:.2f}")
+        print(f"   - Valor-p: {p_kw:.4e}")
+        if p_kw < 0.05:
+            print("   -> CONCLUSION: Existen diferencias significativas en el volumen de errores entre los subsistemas.")
+        else:
+            print("   -> CONCLUSION: No se detectaron diferencias significativas en errores entre subsistemas.")
+            
+    return {
+        'mann_whitney_u': {'statistic': stat_mw, 'p_value': p_mw},
+        'kruskal_wallis': {'statistic': stat_kw, 'p_value': p_kw}
+    }
+
+
+def modelo_regresion_conteo(df_modelo: pd.DataFrame, tipo_modelo: str = "log_ols", imprimir_mensajes: bool = True):
+    """
+    Modelado alternativo para datos de conteo con sesgo:
+    - tipo_modelo='log_ols': OLS transformando la variable dependiente a log(1 + ERROR_TOTAL).
+    - tipo_modelo='poisson': Modelo Lineal Generalizado (GLM) con familia Poisson.
+    """
+    datos_r1 = df_modelo[df_modelo['round_id'] == 'round_1'].copy()
+    
+    if tipo_modelo == "log_ols":
+        if imprimir_mensajes:
+            print("\n" + "="*50)
+            print("MODELO DE REGRESIÓN OLS TRANSFORMADO: log(1 + ERROR_TOTAL)")
+            print("="*50)
+            
+        datos_r1['log_ERROR_TOTAL'] = np.log1p(datos_r1['ERROR_TOTAL'])
+        y = datos_r1['log_ERROR_TOTAL']
+        x_vars = pd.get_dummies(datos_r1[['WARNING', 'subsystem']], drop_first=True)
+        x_vars = sm.add_constant(x_vars)
+        
+        modelo = sm.OLS(y, x_vars.astype(float)).fit()
+        
+        if imprimir_mensajes:
+            print(modelo.summary())
+            print(f"-> R-cuadrado (Log-OLS): {modelo.rsquared:.4f} (Explica el {modelo.rsquared*100:.1f}% de la varianza en log-errores).")
+            
+        return modelo
+        
+    elif tipo_modelo in ["poisson", "glm"]:
+        if imprimir_mensajes:
+            print("\n" + "="*50)
+            print("MODELO DE REGRESIÓN DE POISSON (GLM CONTEO)")
+            print("="*50)
+            
+        y = datos_r1['ERROR_TOTAL']
+        x_vars = pd.get_dummies(datos_r1[['WARNING', 'subsystem']], drop_first=True)
+        x_vars = sm.add_constant(x_vars)
+        
+        modelo = sm.GLM(y, x_vars.astype(float), family=sm.families.Poisson()).fit()
+        
+        if imprimir_mensajes:
+            print(modelo.summary())
+            
+        return modelo
+    else:
+        raise ValueError("tipo_modelo debe ser 'log_ols' o 'poisson'")
+
+
+def graficar_diagnostico_residuos(modelo, ruta_guardar: str | None = None):
+    """
+    Genera gráficos de diagnóstico para evaluar los residuos de un modelo de regresión:
+    1. Gráfico Q-Q de residuos.
+    2. Gráfico de Residuos vs. Valores Ajustados (Fitted).
+    """
+    import matplotlib.pyplot as plt
+    residuos = modelo.resid
+    valores_ajustados = modelo.fittedvalues
+    
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # 1. Plot Q-Q
+    sm.qqplot(residuos, line='s', ax=axes[0])
+    axes[0].set_title("Gráfico Q-Q de Residuos", fontsize=12)
+    
+    # 2. Residuos vs Fitted
+    axes[1].scatter(valores_ajustados, residuos, alpha=0.6, color='indigo')
+    axes[1].axhline(0, color='red', linestyle='--')
+    axes[1].set_title("Residuos vs. Valores Ajustados (Fitted)", fontsize=12)
+    axes[1].set_xlabel("Valores Ajustados (Predicciones)", fontsize=10)
+    axes[1].set_ylabel("Residuos", fontsize=10)
+    
+    plt.tight_layout()
+    if ruta_guardar:
+        plt.savefig(ruta_guardar, dpi=150)
+        plt.close()
+    else:
+        plt.show()
     

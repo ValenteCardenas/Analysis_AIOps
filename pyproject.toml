@@ -15,3 +15,9 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+dev = [
+    "nbconvert>=7.17.1",
+    "playwright>=1.61.0",
+]
